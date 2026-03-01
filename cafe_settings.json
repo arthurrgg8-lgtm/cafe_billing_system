@@ -1,0 +1,29 @@
+{
+  "cafe_name": "CafeBoss",
+  "cafe_tagline": "Modern Billing System",
+  "token_count": 10,
+  "token_label_prefix": "Token",
+  "token_types_enabled": [
+    "dine_in",
+    "takeaway",
+    "delivery",
+    "online"
+  ],
+  "currency_symbol": "Rs",
+  "default_tax_rate": 0.0,
+  "show_tax_on_receipt": false,
+  "min_password_length": 8,
+  "password_expiry_days": 30,
+  "owner_session_timeout_mins": 60,
+  "bills_folder": "bills",
+  "audit_folder": "audit_logs",
+  "save_csv_receipt": true,
+  "tokens_per_row": 5,
+  "confirm_before_payment": true,
+  "payment_methods": [
+    "cash",
+    "online",
+    "card"
+  ],
+  "dev_session_timeout_mins": 30
+}
