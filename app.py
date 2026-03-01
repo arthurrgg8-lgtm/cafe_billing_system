@@ -1,12 +1,47 @@
-import streamlit as st
-import pandas as pd
-import os
-from datetime import datetime, timedelta
-import hashlib
+"""
+CafeBoss - Modern Billing System
+Refactored for production quality: type safety, atomic I/O, proper error handling,
+constant-time auth, and clean separation of concerns.
+"""
+
+from __future__ import annotations
+
 import csv
+import hashlib
+import hmac
+import os
 import platform
 import secrets
+import tempfile
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import streamlit as st
+
 import ui
+
+# ======================================================
+# CONFIGURATION
+# ======================================================
+
+@dataclass(frozen=True)
+class Config:
+    """Central configuration — change behaviour here, not scattered across the file."""
+    default_tokens: int = 10
+    min_password_length: int = 8
+    password_expiry_days: int = 30
+
+    menu_file: Path = Path("menu_items.csv")
+    audit_folder: Path = Path("audit_logs")
+    bills_folder: Path = Path("bills")
+    password_file: Path = Path("owner_password.hash")
+    password_expiry_file: Path = Path("password_expiry.txt")
+
+
+CFG = Config()
 
 # ======================================================
 # PAGE CONFIG
@@ -16,239 +51,288 @@ st.set_page_config(
     page_title="CafeBoss - Modern Billing System",
     page_icon="☕",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # ======================================================
-# SESSION STATE INIT
+# BOOTSTRAP: create required directories & files
 # ======================================================
 
-DEFAULT_TOKENS = 10
+CFG.audit_folder.mkdir(parents=True, exist_ok=True)
+CFG.bills_folder.mkdir(parents=True, exist_ok=True)
 
-if 'authenticated_owner' not in st.session_state:
-    st.session_state.authenticated_owner = False
-
-if 'token_status' not in st.session_state:
-    st.session_state.token_status = {i: False for i in range(1, DEFAULT_TOKENS + 1)}
-
-if 'token_items' not in st.session_state:
-    st.session_state.token_items = {i: [] for i in range(1, DEFAULT_TOKENS + 1)}
-
-if 'selected_token' not in st.session_state:
-    st.session_state.selected_token = 1
-
-if 'show_owner_login' not in st.session_state:
-    st.session_state.show_owner_login = False
-
-if 'confirm_payment' not in st.session_state:
-    st.session_state.confirm_payment = False
+if not CFG.menu_file.exists():
+    pd.DataFrame(columns=["Item", "Price", "Category"]).to_csv(CFG.menu_file, index=False)
 
 # ======================================================
-# FILE PATHS
+# SESSION STATE
 # ======================================================
 
-MENU_FILE = "menu_items.csv"
-AUDIT_FOLDER = "audit_logs"
-BILLS_FOLDER = "bills"
-PASSWORD_FILE = "owner_password.hash"
-PASSWORD_EXPIRY_FILE = "password_expiry.txt"
+def init_session_state() -> None:
+    """Initialise all session-state keys in one place."""
+    defaults: dict[str, Any] = {
+        "authenticated_owner": False,
+        "token_status": {i: False for i in range(1, CFG.default_tokens + 1)},
+        "token_items": {i: [] for i in range(1, CFG.default_tokens + 1)},
+        "selected_token": 1,
+        "show_owner_login": False,
+        "confirm_payment": False,
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
 
-os.makedirs(AUDIT_FOLDER, exist_ok=True)
-os.makedirs(BILLS_FOLDER, exist_ok=True)
 
-# Initialize Menu File
-if not os.path.exists(MENU_FILE):
-    pd.DataFrame(columns=["Item", "Price", "Category"]).to_csv(MENU_FILE, index=False)
-
-# ======================================================
-# SECURITY FUNCTIONS
-# ======================================================
-
-def hash_password(password, salt=None):
-    if salt is None:
-        salt = secrets.token_hex(16)
-    hashed = hashlib.sha256((salt + password).encode()).hexdigest()
-    return f"{salt}${hashed}"
-
-def verify_password(password, stored_value):
-    try:
-        salt, hashed = stored_value.split("$")
-        return hash_password(password, salt) == stored_value
-    except Exception:
-        return False
-
-def save_password(password):
-    if len(password) < 6:
-        raise ValueError("Password must be at least 6 characters.")
-    hashed = hash_password(password)
-    with open(PASSWORD_FILE, 'w') as f:
-        f.write(hashed)
-    expiry = datetime.now() + timedelta(days=30)
-    with open(PASSWORD_EXPIRY_FILE, 'w') as f:
-        f.write(expiry.strftime("%Y-%m-%d"))
-
-def check_password_exists():
-    return os.path.exists(PASSWORD_FILE)
+init_session_state()
 
 # ======================================================
-# BILLING FUNCTIONS
+# SECURITY
 # ======================================================
 
-def get_save_location():
-    system = platform.system()
-    if system == "Windows":
-        downloads = os.path.join(os.path.expanduser("~"), "Downloads")
-        if os.path.exists(downloads):
+class PasswordManager:
+    """Handles password hashing, verification, persistence, and expiry."""
+
+    @staticmethod
+    def hash(password: str, salt: str | None = None) -> str:
+        if salt is None:
+            salt = secrets.token_hex(16)
+        digest = hashlib.sha256((salt + password).encode()).hexdigest()
+        return f"{salt}${digest}"
+
+    @classmethod
+    def verify(cls, password: str, stored_value: str) -> bool:
+        """Constant-time comparison to prevent timing attacks."""
+        try:
+            salt, _ = stored_value.split("$", 1)
+            expected = cls.hash(password, salt)
+            return hmac.compare_digest(expected.encode(), stored_value.encode())
+        except (ValueError, AttributeError):
+            return False
+
+    @classmethod
+    def save(cls, password: str) -> None:
+        if len(password) < CFG.min_password_length:
+            raise ValueError(
+                f"Password must be at least {CFG.min_password_length} characters."
+            )
+        hashed = cls.hash(password)
+        CFG.password_file.write_text(hashed)
+        expiry = datetime.now() + timedelta(days=CFG.password_expiry_days)
+        CFG.password_expiry_file.write_text(expiry.strftime("%Y-%m-%d"))
+
+    @staticmethod
+    def exists() -> bool:
+        return CFG.password_file.exists()
+
+    @staticmethod
+    def is_expired() -> bool:
+        if not CFG.password_expiry_file.exists():
+            return False
+        try:
+            expiry = datetime.strptime(
+                CFG.password_expiry_file.read_text().strip(), "%Y-%m-%d"
+            )
+            return datetime.now() > expiry
+        except ValueError:
+            return False
+
+    @staticmethod
+    def load() -> str:
+        return CFG.password_file.read_text().strip()
+
+
+# ======================================================
+# FILESYSTEM HELPERS
+# ======================================================
+
+def get_save_location() -> tuple[Path, str]:
+    """Return (path, human-readable label) for bill storage."""
+    if platform.system() == "Windows":
+        downloads = Path.home() / "Downloads"
+        if downloads.exists():
             return downloads, "Downloads"
-    return os.path.abspath(BILLS_FOLDER), "Bills Folder"
+    return CFG.bills_folder.resolve(), "Bills Folder"
 
-def save_bill(token, items, total):
-    if not items or total <= 0:
-        raise ValueError("Invalid bill data.")
 
-    save_path, location_desc = get_save_location()
-    os.makedirs(save_path, exist_ok=True)
+def _atomic_write_csv(filepath: Path, rows: list[list[Any]], header: list[str]) -> None:
+    """Write CSV atomically: write to a temp file then rename to avoid partial writes."""
+    parent = filepath.parent
+    parent.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"token{token}_{timestamp}.csv"
-    filepath = os.path.join(save_path, filename)
-
+    fd, tmp_path = tempfile.mkstemp(dir=parent, suffix=".tmp")
     try:
-        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["Token", "Item", "Quantity", "Unit Price", "Subtotal"])
-            for item in items:
-                writer.writerow([
-                    token,
-                    item["Item"],
-                    item["Quantity"],
-                    item["Price"],
-                    item["Subtotal"]
-                ])
-            writer.writerow(["", "", "", "TOTAL", total])
-            writer.writerow(["", "", "", "PAID AT", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow(header)
+            writer.writerows(rows)
+        os.replace(tmp_path, filepath)  # atomic on POSIX; best-effort on Windows
+    except Exception:
+        os.unlink(tmp_path)
+        raise
 
-        # Backup copy
-        backup_path = os.path.join(BILLS_FOLDER, filename)
-        with open(backup_path, 'w', newline='', encoding='utf-8') as f:
+
+# ======================================================
+# BILLING SERVICE
+# ======================================================
+
+class BillingService:
+    """All billing I/O in one place."""
+
+    @staticmethod
+    def save_bill(
+        token: int,
+        items: list[dict[str, Any]],
+        total: float,
+    ) -> tuple[Path, str, str]:
+        if not items or total <= 0:
+            raise ValueError("Cannot save an empty or zero-value bill.")
+
+        save_path, location_desc = get_save_location()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"token{token}_{timestamp}.csv"
+
+        header = ["Token", "Item", "Quantity", "Unit Price", "Subtotal"]
+        rows: list[list[Any]] = [
+            [token, item["Item"], item["Quantity"], item["Price"], item["Subtotal"]]
+            for item in items
+        ]
+        rows.append(["", "", "", "TOTAL", total])
+        rows.append(["", "", "", "PAID AT", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+
+        primary_path = save_path / filename
+        _atomic_write_csv(primary_path, rows, header)
+
+        # Backup (bills folder); skip silently if primary IS the bills folder
+        backup_path = CFG.bills_folder / filename
+        if backup_path != primary_path:
+            _atomic_write_csv(backup_path, rows[:-1], header)  # omit PAID AT in backup
+
+        return primary_path, filename, location_desc
+
+    @staticmethod
+    def save_audit_entry(
+        token: int,
+        items: list[dict[str, Any]],
+        total: float,
+        filename: str,
+    ) -> None:
+        today = datetime.now().strftime("%Y-%m-%d")
+        audit_file = CFG.audit_folder / f"audit_{today}.csv"
+        write_header = not audit_file.exists()
+
+        with audit_file.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["Token", "Item", "Quantity", "Unit Price", "Subtotal"])
-            for item in items:
-                writer.writerow([
-                    token,
-                    item["Item"],
-                    item["Quantity"],
-                    item["Price"],
-                    item["Subtotal"]
-                ])
-            writer.writerow(["", "", "", "TOTAL", total])
-
-    except Exception as e:
-        raise RuntimeError(f"Bill saving failed: {e}")
-
-    return filepath, filename, location_desc
-
-def save_to_audit_log(token, items, total, filename):
-    today = datetime.now().strftime("%Y-%m-%d")
-    audit_file = os.path.join(AUDIT_FOLDER, f"audit_{today}.csv")
-    file_exists = os.path.isfile(audit_file)
-
-    try:
-        with open(audit_file, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            if not file_exists:
+            if write_header:
                 writer.writerow(["Timestamp", "Token", "Total", "Filename", "Item_Count"])
             writer.writerow([
                 datetime.now().strftime("%H:%M:%S"),
                 token,
                 total,
                 filename,
-                len(items)
+                len(items),
             ])
-    except Exception as e:
-        raise RuntimeError(f"Audit logging failed: {e}")
 
-def reset_token(token):
-    if token in st.session_state.token_items:
+    @staticmethod
+    def reset_token(token: int) -> None:
         st.session_state.token_items[token].clear()
-    st.session_state.token_status[token] = False
+        st.session_state.token_status[token] = False
+
 
 # ======================================================
-# OWNER DASHBOARD FUNCTIONS
+# OWNER DASHBOARD SERVICE
 # ======================================================
 
-def get_owner_dashboard_data():
-    today = datetime.now().strftime("%Y-%m-%d")
-    audit_file = os.path.join(AUDIT_FOLDER, f"audit_{today}.csv")
+class DashboardService:
+    @staticmethod
+    def get_today_stats() -> tuple[int, float, list[dict[str, Any]]]:
+        today = datetime.now().strftime("%Y-%m-%d")
+        audit_file = CFG.audit_folder / f"audit_{today}.csv"
 
-    total_bills = 0
-    total_revenue = 0
-    bills_list = []
+        if not audit_file.exists():
+            return 0, 0.0, []
 
-    if os.path.exists(audit_file):
         df = pd.read_csv(audit_file)
-        total_bills = len(df)
-        total_revenue = df["Total"].sum()
-        bills_list = df.to_dict("records")
+        return len(df), float(df["Total"].sum()), df.to_dict("records")
 
-    return total_bills, total_revenue, bills_list
+    @staticmethod
+    def verify_transactions() -> list[dict[str, Any]]:
+        today = datetime.now().strftime("%Y-%m-%d")
+        audit_file = CFG.audit_folder / f"audit_{today}.csv"
+        save_path, _ = get_save_location()
+        missing: list[dict[str, Any]] = []
 
-def verify_transactions():
-    today = datetime.now().strftime("%Y-%m-%d")
-    audit_file = os.path.join(AUDIT_FOLDER, f"audit_{today}.csv")
-    save_path, _ = get_save_location()
+        if not audit_file.exists():
+            return missing
 
-    missing = []
-
-    if os.path.exists(audit_file):
         df = pd.read_csv(audit_file)
         for _, row in df.iterrows():
-            filename = row["Filename"]
+            fname = row["Filename"]
             if not (
-                os.path.exists(os.path.join(save_path, filename)) or
-                os.path.exists(os.path.join(BILLS_FOLDER, filename))
+                (save_path / fname).exists()
+                or (CFG.bills_folder / fname).exists()
             ):
                 missing.append(row.to_dict())
 
-    return missing
+        return missing
+
 
 # ======================================================
-# MENU MANAGEMENT
+# MENU SERVICE
 # ======================================================
 
-def load_menu():
-    return pd.read_csv(MENU_FILE)
+class MenuService:
+    @staticmethod
+    def load() -> pd.DataFrame:
+        return pd.read_csv(CFG.menu_file)
 
-def save_menu(df):
-    df.to_csv(MENU_FILE, index=False)
+    @staticmethod
+    def save(df: pd.DataFrame) -> None:
+        df.to_csv(CFG.menu_file, index=False)
 
-def add_menu_item(name, price, category):
-    if not name or price <= 0:
-        raise ValueError("Invalid menu item.")
-    df = load_menu()
-    new_row = pd.DataFrame({"Item": [name], "Price": [price], "Category": [category]})
-    df = pd.concat([df, new_row], ignore_index=True)
-    save_menu(df)
+    @classmethod
+    def add_item(cls, name: str, price: float, category: str) -> None:
+        if not name.strip() or price <= 0:
+            raise ValueError("Item name must be non-empty and price must be positive.")
+        df = cls.load()
+        new_row = pd.DataFrame({"Item": [name], "Price": [price], "Category": [category]})
+        cls.save(pd.concat([df, new_row], ignore_index=True))
 
-def update_menu_price(idx, new_price):
-    df = load_menu()
-    if 0 <= idx < len(df):
+    @classmethod
+    def update_price(cls, idx: int, new_price: float) -> None:
+        df = cls.load()
+        if not (0 <= idx < len(df)):
+            raise IndexError(f"Menu index {idx} out of range.")
         df.at[idx, "Price"] = new_price
-        save_menu(df)
+        cls.save(df)
 
-def delete_menu_item(idx):
-    df = load_menu()
-    if 0 <= idx < len(df):
-        df = df.drop(idx).reset_index(drop=True)
-        save_menu(df)
+    @classmethod
+    def delete_item(cls, idx: int) -> None:
+        df = cls.load()
+        if not (0 <= idx < len(df)):
+            raise IndexError(f"Menu index {idx} out of range.")
+        cls.save(df.drop(idx).reset_index(drop=True))
+
 
 # ======================================================
-# PASSWORD SETUP
+# NAVIGATION HELPERS (replaces lambda hacks)
 # ======================================================
 
-if not check_password_exists():
+def select_token(token: int) -> None:
+    st.session_state.selected_token = token
+    st.rerun()
+
+
+def logout_owner() -> None:
+    st.session_state.authenticated_owner = False
+    st.rerun()
+
+
+# ======================================================
+# PASSWORD SETUP (first-run)
+# ======================================================
+
+if not PasswordManager.exists():
     ui.load_fancy_css()
-    ui.password_setup_ui(save_password)
+    ui.password_setup_ui(PasswordManager.save)
     st.stop()
 
 # ======================================================
@@ -262,41 +346,50 @@ with st.sidebar:
     ui.token_board(
         selected_token=st.session_state.selected_token,
         token_status=st.session_state.token_status,
-        on_token_click=lambda token: setattr(st.session_state, 'selected_token', token) or st.rerun()
+        on_token_click=select_token,
     )
 
     save_path, loc = get_save_location()
-    ui.save_location_info(save_path, loc)
+    ui.save_location_info(str(save_path), loc)
 
     if st.button("👑 OWNER DASHBOARD", use_container_width=True):
         st.session_state.show_owner_login = True
         st.rerun()
 
-# Owner Login
-if st.session_state.get('show_owner_login', False) and not st.session_state.authenticated_owner:
+# ======================================================
+# OWNER AUTHENTICATION
+# ======================================================
+
+if st.session_state.show_owner_login and not st.session_state.authenticated_owner:
+    if PasswordManager.is_expired():
+        st.warning("Owner password has expired. Please set a new password.")
+        ui.password_setup_ui(PasswordManager.save)
+        st.stop()
+
     password = ui.owner_login_ui()
     if password:
-        with open(PASSWORD_FILE, 'r') as f:
-            stored = f.read().strip()
-        if verify_password(password, stored):
+        if PasswordManager.verify(password, PasswordManager.load()):
             st.session_state.authenticated_owner = True
             st.session_state.show_owner_login = False
             st.rerun()
         else:
-            st.error("Invalid password")
+            st.error("Invalid password.")
 
-# Owner Dashboard
+# ======================================================
+# OWNER DASHBOARD
+# ======================================================
+
 if st.session_state.authenticated_owner:
-    total_bills, total_revenue, recent_bills = get_owner_dashboard_data()
-    missing_files = verify_transactions()
+    total_bills, total_revenue, recent_bills = DashboardService.get_today_stats()
+    missing_files = DashboardService.verify_transactions()
 
     ui.owner_dashboard_ui(
         total_bills,
         total_revenue,
         recent_bills,
         missing_files,
-        on_logout=lambda: setattr(st.session_state, 'authenticated_owner', False) or st.rerun(),
-        on_download_report=lambda: None
+        on_logout=logout_owner,
+        on_download_report=lambda: None,  # placeholder — implement export when ready
     )
     st.stop()
 
@@ -304,8 +397,8 @@ if st.session_state.authenticated_owner:
 # CASHIER INTERFACE
 # ======================================================
 
-selected_token = st.session_state.selected_token
-menu_df = load_menu()
+selected_token: int = st.session_state.selected_token
+menu_df = MenuService.load()
 
 tab1, tab2 = st.tabs(["🧾 Billing", "📋 Menu"])
 
@@ -313,29 +406,26 @@ with tab1:
     col1, col2 = st.columns([2, 1])
 
     with col1:
-
-        def handle_delete(idx):
+        def handle_delete(idx: int) -> None:
             try:
                 st.session_state.token_items[selected_token].pop(idx)
                 if not st.session_state.token_items[selected_token]:
                     st.session_state.token_status[selected_token] = False
                 st.rerun()
-            except Exception:
-                st.error("Failed to remove item.")
+            except IndexError:
+                st.error("Item no longer exists — please refresh.")
 
-        def handle_payment(items, total):
+        def handle_payment(items: list[dict[str, Any]], total: float) -> None:
             try:
-                path, name, loc = save_bill(selected_token, items, total)
-                save_to_audit_log(selected_token, items, total, name)
-
-                reset_token(selected_token)
-
+                _, name, _ = BillingService.save_bill(selected_token, items, total)
+                BillingService.save_audit_entry(selected_token, items, total, name)
+                BillingService.reset_token(selected_token)
                 st.success("Payment successful.")
                 st.rerun()
-            except Exception as e:
-                st.error(str(e))
+            except (ValueError, OSError, RuntimeError) as exc:
+                st.error(str(exc))
 
-        def set_confirm(val):
+        def set_confirm(val: bool) -> None:
             st.session_state.confirm_payment = val
 
         ui.bill_view(
@@ -344,20 +434,19 @@ with tab1:
             handle_delete,
             handle_payment,
             st.session_state.confirm_payment,
-            set_confirm
+            set_confirm,
         )
 
     with col2:
-
-        def handle_add_to_bill(name, price, qty):
+        def handle_add_to_bill(name: str, price: float, qty: int) -> None:
             if qty <= 0:
-                st.error("Quantity must be positive.")
+                st.error("Quantity must be a positive number.")
                 return
             st.session_state.token_items[selected_token].append({
                 "Item": name,
                 "Price": price,
                 "Quantity": qty,
-                "Subtotal": price * qty
+                "Subtotal": price * qty,
             })
             st.session_state.token_status[selected_token] = True
             st.rerun()
@@ -367,9 +456,9 @@ with tab1:
 with tab2:
     ui.menu_view(
         menu_df,
-        add_menu_item,
-        update_menu_price,
-        delete_menu_item
+        MenuService.add_item,
+        MenuService.update_price,
+        MenuService.delete_item,
     )
 
 ui.fancy_footer()
