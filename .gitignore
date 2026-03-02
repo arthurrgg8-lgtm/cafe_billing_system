@@ -1,32 +1,53 @@
-```gitignore
-# Python
+# ── Runtime data (never commit) ───────────────────────────────────────────────
+cafe.db
+cafe.db-wal
+cafe.db-shm
+
+cafe_settings.json
+
+# Passwords & expiry — each machine sets its own
+owner_password.hash
+owner_password_expiry.txt
+dev_password.hash
+dev_password_expiry.txt
+
+# Receipts & audit logs
+bills/
+audit_logs/
+
+# ── Legacy CSV (import source, not part of the app) ───────────────────────────
+menu_items.csv
+
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
+*.pyo
+*.pyd
 .Python
-env/
+
+# Virtual environments
 venv/
-ENV/
-env.bak/
-venv.bak/
-pythonenv*
+.venv/
+env/
+.env/
 
-# Streamlit
-.streamlit/
-*.streamlit
+# Eggs & dist
+*.egg-info/
+dist/
+build/
+*.egg
 
-# Bills directory (but keep the folder)
-bills/
-!bills/.gitkeep
+# ── Streamlit ─────────────────────────────────────────────────────────────────
+.streamlit/secrets.toml
 
-# IDE
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editors ───────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
-.DS_Store
-Thumbs.db
