@@ -1,17 +1,17 @@
 """
 db.py — CafeBoss persistence layer
-Single SQLite file (cafe.db) for all runtime state.
 
-Tables:
-  tokens        — serving units (tables, counters, takeaway slots)
-  active_orders — live line items per token (survives refresh / server restart)
-  bills         — closed/paid orders, append-only, UUID primary key
-  bill_items    — line items belonging to a closed bill
-  menu_items    — menu with stable item_id, availability flag, per-item tax
-  users         — staff accounts (schema ready, auth optional for now)
-
-All writes go through service methods — no raw SQL outside this file.
-WAL mode: multiple readers + one writer without blocking.
+Changes in this version:
+  - bills table gets work_date TEXT column (the cashier's selected working date)
+    paid_at stays as real wall-clock timestamp — work_date is what all filtering uses
+  - Schema migration: ALTER TABLE adds work_date if missing, backfills from DATE(paid_at)
+  - BillService.close_bill() accepts work_date param
+  - BillService.get_bills_by_date(work_date) and get_stats_by_date(work_date)
+  - BillService.find_missing_receipts() takes work_date — checks only that date's files
+  - MenuDB.update_tax_rate() — dev can set per-item tax rate
+  - OrderService.has_any_open_orders() — used to block date change if orders are open
+  - CSV filenames embed work_date: bill_{work_date}_{bill_id[:8]}.csv
+    zero cross-date collisions, owner can see date at a glance in bills/ folder
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def _conn() -> Generator[sqlite3.Connection, None, None]:
 # SCHEMA
 # ──────────────────────────────────────────────────────────────────────────────
 
-SCHEMA = """
+_CREATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS tokens (
     id          INTEGER PRIMARY KEY,
     label       TEXT    NOT NULL,
@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS bills (
     cashier_id     INTEGER,
     filename       TEXT,
     paid_at        TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+    work_date      TEXT,
     notes          TEXT
 );
 
@@ -123,11 +124,38 @@ CREATE TABLE IF NOT EXISTS menu_items (
 );
 """
 
+# Columns added after initial deploy — applied via ALTER TABLE if missing
+_MIGRATIONS = [
+    # (table, column, definition)
+    ("bills", "work_date", "TEXT"),
+]
+
 
 def init_db() -> None:
-    """Create all tables. Safe to call on every startup (IF NOT EXISTS)."""
+    """
+    Create all tables (IF NOT EXISTS) then apply any missing column migrations.
+    Also backfills work_date = DATE(paid_at) for any rows that have NULL work_date.
+    Safe to call on every startup.
+    """
     with _conn() as con:
-        con.executescript(SCHEMA)
+        con.executescript(_CREATE_SCHEMA)
+
+        # Column-level migrations — ALTER TABLE only runs if column is missing
+        existing_cols: dict[str, set[str]] = {}
+        for table, col, defn in _MIGRATIONS:
+            if table not in existing_cols:
+                rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+                existing_cols[table] = {r["name"] for r in rows}
+            if col not in existing_cols[table]:
+                con.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col} {defn}"
+                )
+                existing_cols[table].add(col)
+
+        # Backfill: any bill with NULL work_date gets DATE(paid_at)
+        con.execute(
+            "UPDATE bills SET work_date = DATE(paid_at) WHERE work_date IS NULL"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -137,23 +165,32 @@ def init_db() -> None:
 class TokenService:
 
     @staticmethod
-    def bootstrap_tokens(count: int, label_prefix: str = "Token") -> None:
+    def bootstrap_tokens(count: int, label_prefix: str = "Token",
+                         token_max: int = 50) -> None:
         """
-        Ensure at least `count` tokens exist.
-        Existing tokens are never touched. Only adds new ones.
+        Ensure at least `count` tokens exist, up to token_max hard cap.
+        Existing tokens are never touched.
         """
         with _conn() as con:
             existing = con.execute("SELECT COUNT(*) FROM tokens").fetchone()[0]
-            for i in range(existing + 1, count + 1):
+            target   = min(count, token_max)
+            for i in range(existing + 1, target + 1):
                 con.execute(
                     "INSERT INTO tokens (id, label, type) VALUES (?, ?, 'dine_in')",
                     (i, f"{label_prefix} {i}"),
                 )
 
     @staticmethod
-    def add_token(label: str, token_type: str = "dine_in") -> int:
-        """Add a new token. Returns its assigned id."""
+    def add_token(label: str, token_type: str = "dine_in",
+                  token_max: int = 50) -> tuple[bool, str]:
+        """
+        Add a new token. Returns (success, message).
+        Fails if total token count would exceed token_max.
+        """
         with _conn() as con:
+            total = con.execute("SELECT COUNT(*) FROM tokens").fetchone()[0]
+            if total >= token_max:
+                return False, f"Token cap of {token_max} reached. Ask the developer to raise the limit."
             new_id = con.execute(
                 "SELECT COALESCE(MAX(id), 0) + 1 FROM tokens"
             ).fetchone()[0]
@@ -161,7 +198,7 @@ class TokenService:
                 "INSERT INTO tokens (id, label, type) VALUES (?, ?, ?)",
                 (new_id, label, token_type),
             )
-            return new_id
+            return True, f"Token '{label}' added (id {new_id})."
 
     @staticmethod
     def get_all() -> list[dict[str, Any]]:
@@ -172,12 +209,23 @@ class TokenService:
             return [dict(r) for r in rows]
 
     @staticmethod
+    def get_all_including_disabled() -> list[dict[str, Any]]:
+        with _conn() as con:
+            rows = con.execute("SELECT * FROM tokens ORDER BY id").fetchall()
+            return [dict(r) for r in rows]
+
+    @staticmethod
     def get(token_id: int) -> dict[str, Any] | None:
         with _conn() as con:
             row = con.execute(
                 "SELECT * FROM tokens WHERE id = ?", (token_id,)
             ).fetchone()
             return dict(row) if row else None
+
+    @staticmethod
+    def count() -> int:
+        with _conn() as con:
+            return con.execute("SELECT COUNT(*) FROM tokens").fetchone()[0]
 
     @staticmethod
     def update_label(token_id: int, label: str) -> None:
@@ -203,7 +251,8 @@ class TokenService:
             if active:
                 ts = opened_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 con.execute(
-                    "UPDATE tokens SET active = 1, opened_at = COALESCE(opened_at, ?) WHERE id = ?",
+                    "UPDATE tokens SET active = 1, "
+                    "opened_at = COALESCE(opened_at, ?) WHERE id = ?",
                     (ts, token_id),
                 )
             else:
@@ -211,14 +260,6 @@ class TokenService:
                     "UPDATE tokens SET active = 0, opened_at = NULL WHERE id = ?",
                     (token_id,),
                 )
-
-    @staticmethod
-    def get_status_map() -> dict[int, bool]:
-        with _conn() as con:
-            rows = con.execute(
-                "SELECT id, active FROM tokens WHERE enabled = 1"
-            ).fetchall()
-            return {r["id"]: bool(r["active"]) for r in rows}
 
     @staticmethod
     def delete(token_id: int) -> None:
@@ -257,14 +298,15 @@ class OrderService:
         with _conn() as con:
             con.execute(
                 """INSERT INTO active_orders
-                   (token_id, item_name, item_id, category, unit_price,
-                    quantity, subtotal, cashier_id, added_at)
+                   (token_id, item_name, item_id, category,
+                    unit_price, quantity, subtotal, cashier_id, added_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (token_id, item_name, item_id, category,
                  unit_price, quantity, subtotal, cashier_id, now),
             )
             con.execute(
-                "UPDATE tokens SET active = 1, opened_at = COALESCE(opened_at, ?) WHERE id = ?",
+                "UPDATE tokens SET active = 1, "
+                "opened_at = COALESCE(opened_at, ?) WHERE id = ?",
                 (now, token_id),
             )
 
@@ -272,14 +314,16 @@ class OrderService:
     def remove_item(order_line_id: int) -> None:
         with _conn() as con:
             row = con.execute(
-                "SELECT token_id FROM active_orders WHERE id = ?", (order_line_id,)
+                "SELECT token_id FROM active_orders WHERE id = ?",
+                (order_line_id,),
             ).fetchone()
             if not row:
                 return
             token_id = row["token_id"]
             con.execute("DELETE FROM active_orders WHERE id = ?", (order_line_id,))
             remaining = con.execute(
-                "SELECT COUNT(*) FROM active_orders WHERE token_id = ?", (token_id,)
+                "SELECT COUNT(*) FROM active_orders WHERE token_id = ?",
+                (token_id,),
             ).fetchone()[0]
             if remaining == 0:
                 con.execute(
@@ -300,10 +344,28 @@ class OrderService:
     def get_total(token_id: int) -> float:
         with _conn() as con:
             row = con.execute(
-                "SELECT COALESCE(SUM(subtotal), 0) FROM active_orders WHERE token_id = ?",
+                "SELECT COALESCE(SUM(subtotal), 0) "
+                "FROM active_orders WHERE token_id = ?",
                 (token_id,),
             ).fetchone()
             return round(float(row[0]), 2)
+
+    @staticmethod
+    def has_any_open_orders() -> bool:
+        """True if ANY token currently has items in active_orders."""
+        with _conn() as con:
+            count = con.execute(
+                "SELECT COUNT(*) FROM active_orders"
+            ).fetchone()[0]
+            return count > 0
+
+    @staticmethod
+    def get_open_token_count() -> int:
+        """Number of distinct tokens with open orders."""
+        with _conn() as con:
+            return con.execute(
+                "SELECT COUNT(DISTINCT token_id) FROM active_orders"
+            ).fetchone()[0]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -319,6 +381,7 @@ class BillService:
         token_type: str,
         items: list[dict[str, Any]],
         total: float,
+        work_date: str,               # cashier's selected working date YYYY-MM-DD
         payment_method: str = "cash",
         discount: float = 0.0,
         tax: float = 0.0,
@@ -328,17 +391,17 @@ class BillService:
     ) -> str:
         """Write a closed bill + line items. Returns the UUID bill id."""
         bill_id = str(uuid.uuid4())
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         with _conn() as con:
             con.execute(
                 """INSERT INTO bills
                    (id, token_id, token_label, token_type, total, discount, tax,
-                    payment_method, cashier_id, filename, paid_at, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    payment_method, cashier_id, filename, paid_at, work_date, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (bill_id, token_id, token_label, token_type,
                  total, discount, tax, payment_method,
-                 cashier_id, filename, now, notes),
+                 cashier_id, filename, now, work_date, notes),
             )
             for item in items:
                 con.execute(
@@ -348,12 +411,12 @@ class BillService:
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (
                         bill_id,
-                        item.get("item_name", item.get("Item", "")),
+                        item.get("item_name", ""),
                         item.get("item_id"),
-                        item.get("category", item.get("Category", "")),
-                        item.get("unit_price", item.get("Price", 0)),
-                        item.get("quantity",   item.get("Quantity", 1)),
-                        item.get("subtotal",   item.get("Subtotal", 0)),
+                        item.get("category", ""),
+                        item.get("unit_price", 0),
+                        item.get("quantity",   1),
+                        item.get("subtotal",   0),
                     ),
                 )
         return bill_id
@@ -366,24 +429,41 @@ class BillService:
             )
 
     @staticmethod
-    def get_today_bills() -> list[dict[str, Any]]:
-        today = datetime.now().strftime("%Y-%m-%d")
+    def get_bills_by_date(work_date: str) -> list[dict[str, Any]]:
+        """
+        Return all bills for a given work_date (YYYY-MM-DD).
+        Falls back to DATE(paid_at) for old rows that have NULL work_date.
+        """
         with _conn() as con:
             rows = con.execute(
-                "SELECT * FROM bills WHERE paid_at LIKE ? ORDER BY paid_at DESC",
-                (f"{today}%",),
+                """SELECT * FROM bills
+                   WHERE COALESCE(work_date, DATE(paid_at)) = ?
+                   ORDER BY paid_at DESC""",
+                (work_date,),
             ).fetchall()
             return [dict(r) for r in rows]
 
     @staticmethod
-    def get_today_stats() -> tuple[int, float]:
-        today = datetime.now().strftime("%Y-%m-%d")
+    def get_stats_by_date(work_date: str) -> tuple[int, float]:
         with _conn() as con:
             row = con.execute(
-                "SELECT COUNT(*), COALESCE(SUM(total), 0) FROM bills WHERE paid_at LIKE ?",
-                (f"{today}%",),
+                """SELECT COUNT(*), COALESCE(SUM(total), 0)
+                   FROM bills
+                   WHERE COALESCE(work_date, DATE(paid_at)) = ?""",
+                (work_date,),
             ).fetchone()
             return int(row[0]), round(float(row[1]), 2)
+
+    # Keep these for backward compat / any internal uses
+    @staticmethod
+    def get_today_bills() -> list[dict[str, Any]]:
+        today = datetime.now().strftime("%Y-%m-%d")
+        return BillService.get_bills_by_date(today)
+
+    @staticmethod
+    def get_today_stats() -> tuple[int, float]:
+        today = datetime.now().strftime("%Y-%m-%d")
+        return BillService.get_stats_by_date(today)
 
     @staticmethod
     def get_bill_items(bill_id: str) -> list[dict[str, Any]]:
@@ -395,35 +475,54 @@ class BillService:
 
     @staticmethod
     def get_range(start: str, end: str) -> list[dict[str, Any]]:
+        """Bills where work_date is between start and end (YYYY-MM-DD inclusive)."""
         with _conn() as con:
             rows = con.execute(
                 """SELECT * FROM bills
-                   WHERE paid_at >= ? AND paid_at <= ?
+                   WHERE COALESCE(work_date, DATE(paid_at)) >= ?
+                     AND COALESCE(work_date, DATE(paid_at)) <= ?
                    ORDER BY paid_at DESC""",
-                (f"{start} 00:00:00", f"{end} 23:59:59"),
+                (start, end),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    @staticmethod
+    def get_available_dates() -> list[str]:
+        """
+        Return distinct work_dates that have bills, descending.
+        Used to populate the owner dashboard date picker.
+        """
+        with _conn() as con:
+            rows = con.execute(
+                """SELECT DISTINCT COALESCE(work_date, DATE(paid_at)) AS d
+                   FROM bills ORDER BY d DESC""",
+            ).fetchall()
+            return [r["d"] for r in rows]
 
     @staticmethod
     def find_missing_receipts(
         primary_folder: Path,
         backup_folder: Path,
-        date: str | None = None,
+        work_date: str,
     ) -> list[dict[str, Any]]:
         """
-        Return bills whose CSV receipt cannot be found on disk.
+        Return bills for work_date whose CSV receipt cannot be found on disk.
         Checks both primary_folder and backup_folder.
         Bills with filename=NULL are skipped (receipt writing was disabled).
-        Each returned dict has an extra 'expected_paths': [str, str] key.
+
+        Filenames are now work_date-prefixed: bill_{work_date}_{bill_id[:8]}.csv
+        so this check only ever matches files belonging to that date — zero
+        cross-date collision.
         """
-        date_filter = date or datetime.now().strftime("%Y-%m-%d")
         with _conn() as con:
             rows = con.execute(
-                """SELECT id, token_label, total, payment_method, paid_at, filename
+                """SELECT id, token_label, total, payment_method,
+                          paid_at, work_date, filename
                    FROM bills
-                   WHERE paid_at LIKE ? AND filename IS NOT NULL
+                   WHERE COALESCE(work_date, DATE(paid_at)) = ?
+                     AND filename IS NOT NULL
                    ORDER BY paid_at DESC""",
-                (f"{date_filter}%",),
+                (work_date,),
             ).fetchall()
 
         missing: list[dict[str, Any]] = []
@@ -438,10 +537,7 @@ class BillService:
 
     @staticmethod
     def build_csv_content(bill_id: str) -> str:
-        """
-        Reconstruct CSV receipt as in-memory string from DB records.
-        Used for st.download_button — works even if the file on disk was deleted.
-        """
+        """Reconstruct CSV receipt from DB. Works even if file was deleted."""
         with _conn() as con:
             bill_row  = con.execute(
                 "SELECT * FROM bills WHERE id = ?", (bill_id,)
@@ -460,16 +556,14 @@ class BillService:
         for item in item_rows:
             i = dict(item)
             w.writerow([
-                bill["token_label"],
-                i["item_name"],
-                i["quantity"],
-                i["unit_price"],
-                i["subtotal"],
+                bill["token_label"], i["item_name"],
+                i["quantity"], i["unit_price"], i["subtotal"],
             ])
-        w.writerow(["", "", "", "TOTAL",   bill["total"]])
-        w.writerow(["", "", "", "PAYMENT", bill["payment_method"].upper()])
-        w.writerow(["", "", "", "PAID AT", bill["paid_at"]])
-        w.writerow(["", "", "", "BILL ID", bill["id"][:8].upper()])
+        w.writerow(["", "", "", "TOTAL",      bill["total"]])
+        w.writerow(["", "", "", "PAYMENT",    bill["payment_method"].upper()])
+        w.writerow(["", "", "", "WORK DATE",  bill.get("work_date", "")])
+        w.writerow(["", "", "", "PAID AT",    bill["paid_at"]])
+        w.writerow(["", "", "", "BILL ID",    bill["id"][:8].upper()])
         return buf.getvalue()
 
 
@@ -489,9 +583,10 @@ class MenuDB:
             return [dict(r) for r in con.execute(q).fetchall()]
 
     @staticmethod
-    def add(name: str, price: float, category: str, tax_rate: float = 0.0) -> str:
+    def add(name: str, price: float, category: str,
+            tax_rate: float = 0.0) -> str:
         if not name.strip() or price <= 0:
-            raise ValueError("Item name must be non-empty and price must be positive.")
+            raise ValueError("Name must be non-empty and price must be positive.")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with _conn() as con:
             item_id = con.execute(
@@ -516,6 +611,17 @@ class MenuDB:
             )
 
     @staticmethod
+    def update_tax_rate(item_id: str, tax_rate: float) -> None:
+        """Dev-only: set per-item tax rate (%)."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with _conn() as con:
+            con.execute(
+                "UPDATE menu_items SET tax_rate = ?, updated_at = ? "
+                "WHERE item_id = ?",
+                (max(0.0, tax_rate), now, item_id),
+            )
+
+    @staticmethod
     def set_available(item_id: str, available: bool) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with _conn() as con:
@@ -531,17 +637,12 @@ class MenuDB:
 
     @staticmethod
     def import_from_csv(path: Path) -> int:
-        """
-        Bulk-import from legacy menu_items.csv.
-        Skips names that already exist (case-insensitive).
-        Returns count of newly inserted rows.
-        """
         import pandas as pd
         df = pd.read_csv(path)
         if df.empty:
             return 0
         count = 0
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with _conn() as con:
             existing = {
                 r[0].lower()
