@@ -1,14 +1,11 @@
 """
 config.py — CafeBoss runtime configuration
-Loads from cafe_settings.json. Auto-created and auto-migrated on every startup.
+Auto-created and auto-migrated on every startup via migrate().
 
-Key fixes vs previous version:
-  - __getattr__ now checks _data first, falls back to DEFAULTS, THEN raises.
-    This means any key in DEFAULTS is always accessible even if the JSON
-    on disk was written before that key was added (forward-compatible reads).
-  - migrate() is called on every startup: it writes any missing DEFAULTS keys
-    into the existing JSON so the file stays in sync with the codebase.
-  - ensure_file_exists() now calls migrate() rather than only writing on first run.
+__getattr__ precedence:
+  1. _data (merged JSON + DEFAULTS — always complete)
+  2. DEFAULTS (belt-and-suspenders fallback)
+  3. AttributeError (truly unknown name)
 """
 
 from __future__ import annotations
@@ -19,49 +16,46 @@ from typing import Any
 
 SETTINGS_FILE = Path("cafe_settings.json")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# DEFAULTS — single source of truth for all settings
-# Adding a key here is enough; migrate() will push it into any existing JSON.
-# ──────────────────────────────────────────────────────────────────────────────
-
 DEFAULTS: dict[str, Any] = {
-    # ── Identity ──────────────────────────────────────────────────────────────
+    # Identity
     "cafe_name":                  "CafeBoss",
     "cafe_tagline":               "Modern Billing System",
 
-    # ── Tokens ────────────────────────────────────────────────────────────────
+    # Tokens
     "token_count":                10,
     "token_label_prefix":         "Token",
     "token_types_enabled":        ["dine_in", "takeaway", "delivery", "online"],
+    "token_max":                  50,        # hard cap — owner cannot exceed this
 
-    # ── Currency & Tax ────────────────────────────────────────────────────────
+    # Currency & Tax
     "currency_symbol":            "₹",
     "default_tax_rate":           0.0,
     "show_tax_on_receipt":        False,
 
-    # ── Security ──────────────────────────────────────────────────────────────
+    # Security
     "min_password_length":        8,
     "password_expiry_days":       30,
-    "owner_session_timeout_mins": 60,    # 0 = never expire
-    "dev_session_timeout_mins":   30,    # dev sessions expire faster
+    "owner_session_timeout_mins": 60,
+    "dev_session_timeout_mins":   30,
 
-    # ── Bill saving ───────────────────────────────────────────────────────────
+    # Bill saving
     "bills_folder":               "bills",
     "audit_folder":               "audit_logs",
     "save_csv_receipt":           True,
 
-    # ── UI behaviour ──────────────────────────────────────────────────────────
+    # UI behaviour
     "tokens_per_row":             5,
     "confirm_before_payment":     True,
 
-    # ── Payment methods ───────────────────────────────────────────────────────
+    # Payment methods
     "payment_methods":            ["cash", "card", "upi", "online"],
+
+    # Working date
+    "work_date_lookback_days":    3,         # max days back cashier can set working date
 }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# LOAD / SAVE / MIGRATE
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Load / Save / Migrate ─────────────────────────────────────────────────────
 
 def _load_raw() -> dict[str, Any]:
     if not SETTINGS_FILE.exists():
@@ -73,21 +67,11 @@ def _load_raw() -> dict[str, Any]:
 
 
 def load() -> dict[str, Any]:
-    """
-    Return merged settings: DEFAULTS overlaid with whatever is in JSON.
-    Unknown keys in JSON are silently ignored.
-    Missing keys in JSON are filled from DEFAULTS.
-    This is always safe regardless of how old the JSON file is.
-    """
     raw = _load_raw()
     return {k: raw.get(k, v) for k, v in DEFAULTS.items()}
 
 
 def save(updates: dict[str, Any]) -> None:
-    """
-    Persist a partial or full settings dict.
-    Only keys present in DEFAULTS are written.
-    """
     current = _load_raw()
     for k, v in updates.items():
         if k in DEFAULTS:
@@ -99,12 +83,8 @@ def save(updates: dict[str, Any]) -> None:
 
 
 def migrate() -> None:
-    """
-    Write any DEFAULTS keys that are missing from the on-disk JSON.
-    Safe to call on every startup — only writes when something is missing.
-    Also creates the file from scratch on first run.
-    """
-    raw = _load_raw()
+    """Write any missing DEFAULTS keys into existing JSON. Safe every startup."""
+    raw     = _load_raw()
     missing = {k: v for k, v in DEFAULTS.items() if k not in raw}
     if missing:
         raw.update(missing)
@@ -115,113 +95,62 @@ def migrate() -> None:
 
 
 def ensure_file_exists() -> None:
-    """Call once at startup. Creates or migrates the settings file."""
     migrate()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# TYPED SETTINGS WRAPPER
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Typed Settings wrapper ────────────────────────────────────────────────────
 
 class Settings:
-    """
-    Attribute-style access to merged settings with type guarantees.
-    Instantiate once per Streamlit render cycle (load() is cheap).
-
-    __getattr__ precedence:
-      1. Check self._data (merged result — always has every DEFAULTS key)
-      2. Fall back to DEFAULTS (belt-and-suspenders)
-      3. Raise AttributeError only for truly unknown names
-    """
-
     def __init__(self) -> None:
         self._data: dict[str, Any] = load()
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):
             raise AttributeError(name)
-        # _data is populated in __init__ via load() which always merges DEFAULTS
-        # so every DEFAULTS key is guaranteed to be present.
         data = object.__getattribute__(self, "_data")
         if name in data:
             return data[name]
         if name in DEFAULTS:
             return DEFAULTS[name]
-        raise AttributeError(
-            f"Unknown setting: '{name}'. "
-            f"Add it to DEFAULTS in config.py first."
-        )
-
-    # ── Typed properties (explicit types prevent silent coercion bugs) ─────────
+        raise AttributeError(f"Unknown setting: '{name}'. Add to DEFAULTS first.")
 
     @property
-    def cafe_name(self) -> str:
-        return str(self._data["cafe_name"])
-
+    def cafe_name(self) -> str:               return str(self._data["cafe_name"])
     @property
-    def cafe_tagline(self) -> str:
-        return str(self._data["cafe_tagline"])
-
+    def cafe_tagline(self) -> str:            return str(self._data["cafe_tagline"])
     @property
-    def token_count(self) -> int:
-        return int(self._data["token_count"])
-
+    def token_count(self) -> int:             return int(self._data["token_count"])
     @property
-    def token_label_prefix(self) -> str:
-        return str(self._data["token_label_prefix"])
-
+    def token_label_prefix(self) -> str:      return str(self._data["token_label_prefix"])
     @property
-    def token_types_enabled(self) -> list[str]:
-        return list(self._data["token_types_enabled"])
-
+    def token_types_enabled(self) -> list:    return list(self._data["token_types_enabled"])
     @property
-    def currency_symbol(self) -> str:
-        return str(self._data["currency_symbol"])
-
+    def token_max(self) -> int:               return int(self._data["token_max"])
     @property
-    def default_tax_rate(self) -> float:
-        return float(self._data["default_tax_rate"])
-
+    def currency_symbol(self) -> str:         return str(self._data["currency_symbol"])
     @property
-    def show_tax_on_receipt(self) -> bool:
-        return bool(self._data["show_tax_on_receipt"])
-
+    def default_tax_rate(self) -> float:      return float(self._data["default_tax_rate"])
     @property
-    def min_password_length(self) -> int:
-        return int(self._data["min_password_length"])
-
+    def show_tax_on_receipt(self) -> bool:    return bool(self._data["show_tax_on_receipt"])
     @property
-    def password_expiry_days(self) -> int:
-        return int(self._data["password_expiry_days"])
-
+    def min_password_length(self) -> int:     return int(self._data["min_password_length"])
     @property
-    def owner_session_timeout_mins(self) -> int:
-        return int(self._data["owner_session_timeout_mins"])
-
+    def password_expiry_days(self) -> int:    return int(self._data["password_expiry_days"])
     @property
-    def dev_session_timeout_mins(self) -> int:
-        return int(self._data["dev_session_timeout_mins"])
-
+    def owner_session_timeout_mins(self) -> int: return int(self._data["owner_session_timeout_mins"])
     @property
-    def bills_folder(self) -> Path:
-        return Path(str(self._data["bills_folder"]))
-
+    def dev_session_timeout_mins(self) -> int:   return int(self._data["dev_session_timeout_mins"])
     @property
-    def audit_folder(self) -> Path:
-        return Path(str(self._data["audit_folder"]))
-
+    def bills_folder(self) -> Path:           return Path(str(self._data["bills_folder"]))
     @property
-    def save_csv_receipt(self) -> bool:
-        return bool(self._data["save_csv_receipt"])
-
+    def audit_folder(self) -> Path:           return Path(str(self._data["audit_folder"]))
     @property
-    def tokens_per_row(self) -> int:
-        return int(self._data["tokens_per_row"])
-
+    def save_csv_receipt(self) -> bool:       return bool(self._data["save_csv_receipt"])
     @property
-    def confirm_before_payment(self) -> bool:
-        return bool(self._data["confirm_before_payment"])
-
+    def tokens_per_row(self) -> int:          return int(self._data["tokens_per_row"])
     @property
-    def payment_methods(self) -> list[str]:
-        return list(self._data["payment_methods"])
+    def confirm_before_payment(self) -> bool: return bool(self._data["confirm_before_payment"])
+    @property
+    def payment_methods(self) -> list:        return list(self._data["payment_methods"])
+    @property
+    def work_date_lookback_days(self) -> int: return int(self._data["work_date_lookback_days"])
