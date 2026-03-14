@@ -14,6 +14,8 @@ Architecture note — why _render() exists:
 from __future__ import annotations
 
 import csv
+import base64
+import binascii
 import hashlib
 import hmac
 import os
@@ -65,6 +67,8 @@ st.set_page_config(
 # ──────────────────────────────────────────────────────────────────────────────
 
 class CredentialStore:
+    _SCHEME = "pbkdf2_sha256"
+    _ITERATIONS = 260_000
 
     def __init__(self, role: str) -> None:
         self.role         = role
@@ -72,11 +76,45 @@ class CredentialStore:
         self._expiry_file = Path(f"{role}_password_expiry.txt")
 
     @staticmethod
-    def _hash(password: str, salt: str | None = None) -> str:
+    def _legacy_hash(password: str, salt: str | None = None) -> str:
         if salt is None:
             salt = secrets.token_hex(16)
         digest = hashlib.sha256((salt + password).encode()).hexdigest()
         return f"{salt}${digest}"
+
+    @classmethod
+    def _hash(cls, password: str, salt_b64: str | None = None) -> str:
+        if salt_b64 is None:
+            salt = secrets.token_bytes(16)
+            salt_b64 = base64.b64encode(salt).decode("ascii")
+        else:
+            salt = base64.b64decode(salt_b64.encode("ascii"))
+        dk = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            cls._ITERATIONS,
+        )
+        digest_b64 = base64.b64encode(dk).decode("ascii")
+        return f"{cls._SCHEME}${cls._ITERATIONS}${salt_b64}${digest_b64}"
+
+    @staticmethod
+    def _atomic_write_text(path: Path, value: str) -> None:
+        fd, tmp = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(value)
+            os.replace(tmp, path)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def exists(self) -> bool:
         return self._hash_file.exists()
@@ -86,21 +124,41 @@ class CredentialStore:
         min_len = cfg.min_password_length
         if len(password) < min_len:
             raise ValueError(f"Password must be at least {min_len} characters.")
-        self._hash_file.write_text(self._hash(password))
+        self._atomic_write_text(self._hash_file, self._hash(password))
         expiry_days = cfg.password_expiry_days
         if expiry_days > 0:
             expiry = datetime.now() + timedelta(days=expiry_days)
-            self._expiry_file.write_text(expiry.strftime("%Y-%m-%d"))
+            self._atomic_write_text(self._expiry_file, expiry.strftime("%Y-%m-%d"))
 
     def verify(self, password: str) -> bool:
         if not self.exists():
             return False
-        stored = self._hash_file.read_text().strip()
+        stored = self._hash_file.read_text(encoding="utf-8").strip()
         try:
-            salt, _ = stored.split("$", 1)
-            expected = self._hash(password, salt)
-            return hmac.compare_digest(expected.encode(), stored.encode())
-        except (ValueError, AttributeError):
+            parts = stored.split("$")
+            # Legacy format: salt$sha256_hex
+            if len(parts) == 2:
+                salt = parts[0]
+                expected = self._legacy_hash(password, salt)
+                ok = hmac.compare_digest(expected.encode(), stored.encode())
+                if ok:
+                    # Seamless upgrade to a slow KDF at next successful login.
+                    self.save(password)
+                return ok
+            if len(parts) != 4 or parts[0] != self._SCHEME:
+                return False
+            _, iterations_s, salt_b64, digest_b64 = parts
+            iterations = int(iterations_s)
+            salt = base64.b64decode(salt_b64.encode("ascii"))
+            expected = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                salt,
+                iterations,
+            )
+            expected_b64 = base64.b64encode(expected).decode("ascii")
+            return hmac.compare_digest(expected_b64.encode(), digest_b64.encode())
+        except (ValueError, TypeError, AttributeError, binascii.Error):
             return False
 
     def is_expired(self) -> bool:
@@ -137,6 +195,11 @@ def _init_session_state() -> None:
         "last_bill_download":  None,
         "work_date":           _TODAY,
         "show_date_picker":    False,
+        "show_kitchen_display": False,
+        "owner_login_attempts": 0,
+        "owner_locked_until": None,
+        "dev_login_attempts": 0,
+        "dev_locked_until": None,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -177,6 +240,28 @@ def _session_valid(auth_key: str, authed_at_key: str, timeout_mins: int) -> bool
     return (datetime.now() - authed_at).total_seconds() / 60 < timeout_mins
 
 
+def _can_attempt_auth(role: str) -> tuple[bool, str | None]:
+    now = datetime.now()
+    locked_until = st.session_state.get(f"{role}_locked_until")
+    if isinstance(locked_until, datetime) and now < locked_until:
+        wait = max(1, int((locked_until - now).total_seconds()))
+        return False, f"Too many failed {role} login attempts. Try again in {wait}s."
+    return True, None
+
+
+def _record_auth_failure(role: str) -> None:
+    key = f"{role}_login_attempts"
+    attempts = int(st.session_state.get(key, 0)) + 1
+    st.session_state[key] = attempts
+    delay = min(120, 2 ** max(0, attempts - 1))
+    st.session_state[f"{role}_locked_until"] = datetime.now() + timedelta(seconds=delay)
+
+
+def _reset_auth_failures(role: str) -> None:
+    st.session_state[f"{role}_login_attempts"] = 0
+    st.session_state[f"{role}_locked_until"] = None
+
+
 def _owner_session_valid() -> bool:
     return _session_valid(
         "authenticated_owner", "owner_authed_at",
@@ -208,12 +293,18 @@ def _logout_dev() -> None:
     st.rerun()
 
 
+def _show_cashier_view() -> None:
+    st.session_state.show_kitchen_display = False
+    st.rerun()
+
+
 def _get_save_location() -> tuple[Path, str]:
     if platform.system() == "Windows":
         dl = Path.home() / "Downloads"
         if dl.exists():
             return dl, "Downloads"
     return CFG.bills_folder.resolve(), "Bills Folder"
+
 
 
 def _atomic_write_csv(filepath: Path, rows: list[list[Any]],
@@ -238,6 +329,8 @@ def _write_csv_receipt(
     total: float,
     payment_method: str,
     work_date: str,
+    customer_rating: int | None = None,
+    customer_review: str | None = None,
 ) -> tuple[Path, str, str]:
     save_path, location_desc = _get_save_location()
     filename = f"bill_{work_date}_{bill_id[:8]}.csv"
@@ -253,6 +346,10 @@ def _write_csv_receipt(
         ["", "", "", "WORK DATE", work_date],
         ["", "", "", "PAID AT",   datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
     ]
+    if customer_rating is not None:
+        rows.append(["", "", "", "CUSTOMER RATING", customer_rating])
+    if customer_review:
+        rows.append(["", "", "", "CUSTOMER REVIEW", customer_review])
     primary = save_path / filename
     _atomic_write_csv(primary, rows, header)
     backup = CFG.bills_folder / filename
@@ -349,9 +446,31 @@ def _render() -> None:  # noqa: C901
         save_path, loc = _get_save_location()
         ui.save_location_info(str(save_path), loc)
 
+        if st.button("🍳 KITCHEN DISPLAY", use_container_width=True):
+            st.session_state.show_kitchen_display = True
+            st.session_state.show_owner_login = False
+            st.rerun()
+
         if st.button("👑 OWNER DASHBOARD", use_container_width=True):
             st.session_state.show_owner_login = True
+            st.session_state.show_kitchen_display = False
             st.rerun()
+
+    # ── Kitchen display ───────────────────────────────────────────────────────
+    if st.session_state.show_kitchen_display:
+        def _set_kds_status(order_line_id: int, status: str) -> None:
+            try:
+                db.OrderService.set_prep_status(order_line_id, status)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not update prep status: {exc}")
+
+        ui.kitchen_display_ui(
+            rows=db.OrderService.get_kitchen_snapshot(),
+            on_set_status=_set_kds_status,
+            on_back=_show_cashier_view,
+        )
+        st.stop()
 
     # ── Owner auth gate ───────────────────────────────────────────────────────
     if st.session_state.show_owner_login and not _owner_session_valid():
@@ -370,12 +489,17 @@ def _render() -> None:  # noqa: C901
             st.session_state.show_owner_login = False
             st.rerun()
         elif result:
-            if _owner_creds.verify(result):
+            can_try, warning = _can_attempt_auth("owner")
+            if not can_try:
+                st.warning(warning)
+            elif _owner_creds.verify(result):
+                _reset_auth_failures("owner")
                 st.session_state.authenticated_owner = True
                 st.session_state.owner_authed_at     = datetime.now()
                 st.session_state.show_owner_login    = False
                 st.rerun()
             else:
+                _record_auth_failure("owner")
                 st.error("Invalid owner password.")
 
     # ── Owner dashboard ───────────────────────────────────────────────────────
@@ -443,12 +567,23 @@ def _render() -> None:  # noqa: C901
             st.rerun()
 
         def _on_dev_login_attempt(password: str) -> None:
+            can_try, warning = _can_attempt_auth("dev")
+            if not can_try:
+                st.session_state["_dev_login_error"] = True
+                st.session_state["_dev_login_warn"] = warning
+                return
             if _dev_creds.verify(password):
+                _reset_auth_failures("dev")
                 st.session_state.authenticated_dev = True
                 st.session_state.dev_authed_at     = datetime.now()
                 st.rerun()
             else:
+                _record_auth_failure("dev")
                 st.session_state["_dev_login_error"] = True
+
+        dev_login_warn = st.session_state.pop("_dev_login_warn", None)
+        if dev_login_warn:
+            st.warning(dev_login_warn)
 
         ui.owner_dashboard_ui(
             total_bills=total_bills,
@@ -524,6 +659,8 @@ def _render() -> None:  # noqa: C901
                 items: list[dict[str, Any]],
                 total: float,
                 payment_method: str,
+                customer_rating: int | None = None,
+                customer_review: str | None = None,
             ) -> None:
                 try:
                     token = db.TokenService.get(selected_token_id)
@@ -531,6 +668,13 @@ def _render() -> None:  # noqa: C901
                         st.error("Token not found.")
                         return
                     work_date = st.session_state.work_date
+                    review_text = (customer_review or "").strip() or None
+                    rating = int(customer_rating) if customer_rating is not None else None
+                    reviewed_at = (
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        if (rating is not None or review_text)
+                        else None
+                    )
                     bill_id   = db.BillService.close_bill(
                         token_id=selected_token_id,
                         token_label=token["label"],
@@ -539,6 +683,9 @@ def _render() -> None:  # noqa: C901
                         total=total,
                         work_date=work_date,
                         payment_method=payment_method,
+                        customer_rating=rating,
+                        customer_review=review_text,
+                        reviewed_at=reviewed_at,
                     )
                     if CFG.save_csv_receipt:
                         if platform.system() == "Windows":
@@ -555,6 +702,8 @@ def _render() -> None:  # noqa: C901
                             _, filename, _ = _write_csv_receipt(
                                 bill_id, token["label"], items,
                                 total, payment_method, work_date,
+                                customer_rating=rating,
+                                customer_review=review_text,
                             )
                             db.BillService.update_filename(bill_id, filename)
                     db.OrderService.clear_token(selected_token_id)
