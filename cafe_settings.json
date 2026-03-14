@@ -25,5 +25,7 @@
     "online",
     "card"
   ],
-  "dev_session_timeout_mins": 30
+  "dev_session_timeout_mins": 30,
+  "token_max": 11,
+  "work_date_lookback_days": 3
 }
