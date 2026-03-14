@@ -13,7 +13,8 @@ New in this version:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import html
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 import pandas as pd
@@ -77,12 +78,12 @@ def load_fancy_css() -> None:
 
         .stButton > button {
             font-family: 'IBM Plex Mono', monospace !important;
-            font-size: .75rem !important; font-weight: 600 !important;
-            letter-spacing: .08em !important; text-transform: uppercase !important;
+            font-size: .73rem !important; font-weight: 600 !important;
+            letter-spacing: .05em !important; text-transform: none !important;
             background: var(--mahogany) !important; color: var(--gold) !important;
             border: 1px solid var(--caramel) !important;
             border-radius: var(--radius) !important;
-            transition: all .15s ease !important;
+            transition: all .18s ease !important;
             box-shadow: 0 2px 8px rgba(0,0,0,.4) !important;
             min-height: 2.4rem !important; padding: .45rem .8rem !important;
         }
@@ -140,6 +141,7 @@ def load_fancy_css() -> None:
             background: var(--espresso) !important;
             border: 1px solid var(--mahogany) !important;
             border-radius: var(--radius) !important; padding: .8rem !important;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,.02) !important;
         }
         [data-testid="stMetricLabel"] {
             font-family: 'IBM Plex Mono', monospace !important;
@@ -191,6 +193,71 @@ def load_fancy_css() -> None:
             color: #e09a3a; border-color: #c07c3a;
             background: var(--warn-bg);
         }
+        .cb-panel {
+            background: var(--espresso);
+            border: 1px solid var(--mahogany);
+            border-radius: var(--radius);
+            padding: .7rem .85rem;
+        }
+        .cb-muted {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: .6rem;
+            color: var(--steam);
+            letter-spacing: .1em;
+            text-transform: uppercase;
+        }
+        .cb-token-label {
+            text-align: center;
+            margin-top: .2rem;
+            font-family: 'DM Sans', sans-serif;
+            font-size: .68rem;
+            color: var(--cream);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .cb-token-tile {
+            border: 1px solid var(--mahogany);
+            border-radius: var(--radius);
+            background: var(--espresso);
+            padding: .5rem .55rem .45rem;
+            min-height: 84px;
+            display: flex;
+            flex-direction: column;
+            gap: .22rem;
+        }
+        .cb-token-tile.active {
+            border-color: #8bc59f;
+            box-shadow: inset 0 0 0 1px rgba(46,139,87,.18);
+        }
+        .cb-token-tile.selected {
+            border-color: var(--caramel);
+            box-shadow: inset 0 0 0 1px rgba(47,111,221,.24);
+        }
+        .cb-token-kicker {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: .56rem;
+            color: var(--steam);
+            text-transform: uppercase;
+            letter-spacing: .1em;
+        }
+        .cb-token-title {
+            font-family: 'DM Sans', sans-serif;
+            color: var(--cream);
+            font-size: .78rem;
+            font-weight: 600;
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .cb-token-status {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: .58rem;
+            letter-spacing: .07em;
+            text-transform: uppercase;
+            color: var(--steam);
+        }
 
         @media (max-width: 640px) {
             [data-testid="stAppViewBlockContainer"] { padding: .6rem .7rem !important; }
@@ -217,31 +284,36 @@ def load_fancy_css() -> None:
 
 def fancy_header(cafe_name: str = "CafeBoss",
                  tagline: str = "Modern Billing System") -> None:
+    safe_name = html.escape(cafe_name)
+    safe_tagline = html.escape(tagline)
     st.markdown(
-        f"""<div style="display:flex;align-items:center;gap:12px;
-                        padding:1rem 0 .6rem;border-bottom:2px solid #3d2b1a;
-                        margin-bottom:1.2rem;flex-wrap:wrap;">
-            <span style="font-size:2rem;line-height:1;">☕</span>
-            <div>
+        f"""<div class="cb-panel" style="display:flex;align-items:center;justify-content:space-between;
+                        gap:12px; margin-bottom:1rem; flex-wrap:wrap; padding:1rem 1.1rem;">
+            <div style="display:flex;align-items:center;gap:12px;">
+                <span style="font-size:1.8rem;line-height:1;">☕</span>
+                <div>
                 <div class="cb-header-title"
-                     style="font-family:'Playfair Display',serif;font-size:1.9rem;
-                            font-weight:900;color:#e0a84b;letter-spacing:-.01em;line-height:1;">
-                    {cafe_name}</div>
+                     style="font-family:'Playfair Display',serif;font-size:1.7rem;
+                            font-weight:900;color:var(--gold);letter-spacing:-.01em;line-height:1;">
+                    {safe_name}</div>
                 <div style="font-family:'IBM Plex Mono',monospace;font-size:.62rem;
-                            color:#8a7566;letter-spacing:.16em;text-transform:uppercase;
-                            margin-top:2px;">{tagline}</div>
+                            color:var(--steam);letter-spacing:.16em;text-transform:uppercase;
+                            margin-top:4px;">{safe_tagline}</div>
+                </div>
             </div>
+            <div class="cb-muted">Billing Console</div>
         </div>""",
         unsafe_allow_html=True,
     )
 
 
 def fancy_footer(cafe_name: str = "CafeBoss") -> None:
+    safe_name = html.escape(cafe_name)
     st.markdown(
-        f"""<div style="margin-top:2.5rem;padding-top:.8rem;border-top:1px solid #3d2b1a;
-                        font-family:'IBM Plex Mono',monospace;font-size:.58rem;color:#8a7566;
+        f"""<div style="margin-top:2.2rem;padding-top:.8rem;border-top:1px solid var(--mahogany);
+                        font-family:'IBM Plex Mono',monospace;font-size:.58rem;color:var(--steam);
                         letter-spacing:.12em;text-align:center;text-transform:uppercase;">
-            {cafe_name} &nbsp;·&nbsp; Billing System &nbsp;·&nbsp; All rights reserved
+            {safe_name} &nbsp;·&nbsp; Billing System
         </div>""",
         unsafe_allow_html=True,
     )
@@ -258,15 +330,15 @@ def setup_wizard_ui(
     on_save: Callable[[str], None],
 ) -> None:
     is_dev = role == "dev"
-    accent = "#4a90d9" if is_dev else "#e0a84b"
+    accent = "var(--dev-accent)" if is_dev else "var(--gold)"
     st.markdown(
         f"""<div style="max-width:440px;margin:3rem auto;text-align:center;padding:0 1rem;">
             <div style="font-family:'Playfair Display',serif;font-size:1.8rem;
                         color:{accent};margin-bottom:.4rem;">{title}</div>
             <div style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;
-                        color:#8a7566;letter-spacing:.14em;text-transform:uppercase;
+                        color:var(--steam);letter-spacing:.14em;text-transform:uppercase;
                         margin-bottom:1.6rem;">{subtitle}</div>
-            {"<div style='background:#1e3a5f;border:1px solid #2d5a8e;border-radius:6px;padding:.7rem 1rem;font-family:IBM Plex Mono,monospace;font-size:.66rem;color:#4a90d9;margin-bottom:1.2rem;text-align:left;'>⚠️ Keep this separate from the owner password.</div>" if is_dev else ""}
+            {"<div style='background:var(--dev-dark);border:1px solid var(--mahogany);border-radius:6px;padding:.7rem 1rem;font-family:IBM Plex Mono,monospace;font-size:.66rem;color:var(--dev-accent);margin-bottom:1.2rem;text-align:left;'>⚠️ Keep this separate from the owner password.</div>" if is_dev else ""}
         </div>""",
         unsafe_allow_html=True,
     )
@@ -296,14 +368,18 @@ def setup_wizard_ui(
 
 def role_login_ui(role: str, label: str) -> str | None:
     is_dev = role == "dev"
-    border = "#2d5a8e" if is_dev else "#3d2b1a"
-    color  = "#4a90d9" if is_dev else "#e0a84b"
+    border = "var(--dev-accent)" if is_dev else "var(--mahogany)"
+    color  = "var(--dev-accent)" if is_dev else "var(--gold)"
+    safe_label = html.escape(label)
     st.markdown(
-        f"""<div style="background:#1a1007;border:1px solid {border};border-radius:8px;
+        f"""<div style="background:var(--espresso);border:1px solid {border};border-radius:8px;
                         padding:1.6rem;max-width:380px;margin:1.5rem auto;">
             <div style="font-family:'Playfair Display',serif;font-size:1.3rem;
                         color:{color};margin-bottom:1rem;text-align:center;">
-                {label}</div>""",
+                {safe_label}</div>
+            <div class="cb-muted" style="text-align:center;margin-bottom:.8rem;">
+                Secure login required
+            </div>""",
         unsafe_allow_html=True,
     )
     with st.form(f"{role}_login_form"):
@@ -339,9 +415,9 @@ def working_date_ui(
     label = f"{'⚠️ ' if is_stale else '📅 '}{work_date}"
 
     st.markdown(
-        f"""<div style="margin-bottom:.4rem;">
+        f"""<div class="cb-panel" style="margin-bottom:.5rem;">
             <div style="font-family:'IBM Plex Mono',monospace;font-size:.58rem;
-                        color:#8a7566;letter-spacing:.12em;text-transform:uppercase;
+                        color:var(--steam);letter-spacing:.12em;text-transform:uppercase;
                         margin-bottom:.3rem;">Working Date</div>
             <span class="{badge_class}">{label}</span>
         </div>""",
@@ -387,7 +463,7 @@ def token_board(
     if not tokens:
         st.caption("No tokens. Configure in Owner Dashboard.")
         return
-    cols_n = min(tokens_per_row, 3)
+    cols_n = max(1, min(tokens_per_row, 8))
     rows   = [tokens[i : i + cols_n] for i in range(0, len(tokens), cols_n)]
     for row in rows:
         cols = st.columns(len(row))
@@ -401,17 +477,24 @@ def token_board(
                 if st.button(f"{icon}\n{tid}", key=f"tok_{tid}",
                              use_container_width=True, help=label):
                     on_token_click(tid)
+                safe_label = html.escape(str(label))
+                st.markdown(
+                    f"<div class='cb-token-label' title='{safe_label}'>{safe_label}</div>",
+                    unsafe_allow_html=True,
+                )
 
 
 def save_location_info(path: str, label: str) -> None:
     st.markdown("<hr>", unsafe_allow_html=True)
+    safe_label = html.escape(label)
+    safe_path = html.escape(path)
     st.markdown(
-        f"""<div style="font-family:'IBM Plex Mono',monospace;font-size:.6rem;
-                        color:#8a7566;letter-spacing:.08em;line-height:1.6;">
+        f"""<div class="cb-panel" style="font-family:'IBM Plex Mono',monospace;font-size:.6rem;
+                        color:var(--steam);letter-spacing:.08em;line-height:1.6;">
             <div style="text-transform:uppercase;margin-bottom:2px;">Save Location</div>
-            <div style="color:#c07c3a;">{label}</div>
-            <div style="color:#4a3a2a;font-size:.54rem;word-break:break-all;
-                        margin-top:2px;">{path}</div>
+            <div style="color:var(--caramel);">{safe_label}</div>
+            <div style="color:var(--steam);font-size:.54rem;word-break:break-all;
+                        margin-top:3px;">{safe_path}</div>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -429,7 +512,7 @@ def bill_view(
     payment_methods: list[str],
     confirm_before_payment: bool,
     on_delete: Callable[[int], None],
-    on_payment: Callable[[list[dict[str, Any]], float, str], None],
+    on_payment: Callable[[list[dict[str, Any]], float, str, int | None, str | None], None],
     confirm_state: bool,
     set_confirm: Callable[[bool], None],
     work_date: str,
@@ -456,20 +539,24 @@ def bill_view(
         "delivery": "🛵 Delivery",
         "online":   "💻 Online",
     }.get(token_type, token_type)
+    safe_work_date = html.escape(str(work_date))
+    safe_token_label = html.escape(str(token_label))
+    safe_type_badge = html.escape(str(type_badge))
+    safe_currency = html.escape(str(currency))
 
     st.markdown(
-        f"""<div style="font-family:'IBM Plex Mono',monospace;background:#1a1007;
-                        border:1px solid #3d2b1a;border-radius:6px 6px 0 0;
+        f"""<div style="font-family:'IBM Plex Mono',monospace;background:var(--espresso);
+                        border:1px solid var(--mahogany);border-radius:6px 6px 0 0;
                         padding:.6rem 1rem;display:flex;justify-content:space-between;
                         align-items:center;flex-wrap:wrap;gap:.4rem;">
             <span style="font-size:.65rem;letter-spacing:.14em;text-transform:uppercase;
-                          color:#8a7566;">
+                          color:var(--steam);">
                 Receipt &nbsp;·&nbsp;
-                <span style="color:#c07c3a;">{work_date}</span>
+                <span style="color:var(--caramel);">{safe_work_date}</span>
             </span>
-            <span style="font-size:.72rem;color:#e0a84b;font-weight:600;">
-                {token_label}
-                <span style="color:#8a7566;font-weight:400;"> · {type_badge}</span>
+            <span style="font-size:.72rem;color:var(--gold);font-weight:600;">
+                {safe_token_label}
+                <span style="color:var(--steam);font-weight:400;"> · {safe_type_badge}</span>
             </span>
         </div>""",
         unsafe_allow_html=True,
@@ -477,11 +564,11 @@ def bill_view(
 
     if not items:
         st.markdown(
-            """<div style="background:#1a1007;border:1px solid #3d2b1a;border-top:none;
+            """<div style="background:var(--espresso);border:1px solid var(--mahogany);border-top:none;
                            border-radius:0 0 6px 6px;padding:2rem;text-align:center;">
                 <div style="font-size:1.8rem;margin-bottom:.4rem;">🍃</div>
                 <div style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;
-                            color:#5a4a3a;letter-spacing:.1em;text-transform:uppercase;">
+                            color:var(--steam);letter-spacing:.1em;text-transform:uppercase;">
                     No items yet</div>
             </div>""",
             unsafe_allow_html=True,
@@ -499,14 +586,15 @@ def bill_view(
 
         ci, cd = st.columns([5, 1])
         with ci:
+            safe_name = html.escape(str(name))
             st.markdown(
-                f"""<div style="padding:.35rem 1rem;border-bottom:1px solid #2d1f0e;
+                f"""<div style="padding:.35rem 1rem;border-bottom:1px solid var(--mahogany);
                                 font-family:'IBM Plex Mono',monospace;font-size:.72rem;">
-                    <span style="color:#f5ead8;">{name}</span>
-                    <span style="color:#5a4a3a;"> ×{qty}</span>
-                    <span style="float:right;color:#e0a84b;">{currency}{subtotal:,.2f}</span>
-                    <span style="float:right;color:#5a4a3a;margin-right:.8rem;">
-                        @{currency}{price:,.2f}</span>
+                    <span style="color:var(--cream);">{safe_name}</span>
+                    <span style="color:var(--steam);"> ×{qty}</span>
+                    <span style="float:right;color:var(--gold);">{safe_currency}{subtotal:,.2f}</span>
+                    <span style="float:right;color:var(--steam);margin-right:.8rem;">
+                        @{safe_currency}{price:,.2f}</span>
                 </div>""",
                 unsafe_allow_html=True,
             )
@@ -516,14 +604,14 @@ def bill_view(
 
     total = round(total, 2)
     st.markdown(
-        f"""<div style="background:#2d1f0e;border:1px solid #3d2b1a;border-top:none;
+        f"""<div style="background:#eef3fb;border:1px solid var(--mahogany);border-top:none;
                         border-radius:0 0 6px 6px;padding:.7rem 1rem;
                         font-family:'IBM Plex Mono',monospace;
                         display:flex;justify-content:space-between;align-items:center;">
             <span style="font-size:.65rem;letter-spacing:.14em;text-transform:uppercase;
-                          color:#8a7566;">Total</span>
-            <span style="font-size:1.25rem;font-weight:700;color:#e0a84b;">
-                {currency}{total:,.2f}</span>
+                          color:var(--steam);">Total</span>
+            <span style="font-size:1.25rem;font-weight:700;color:var(--gold);">
+                {safe_currency}{total:,.2f}</span>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -531,11 +619,29 @@ def bill_view(
     st.write("")
     method = st.selectbox("Payment Method", options=payment_methods,
                           key=f"pay_method_{token_id}")
+    add_review = st.checkbox("Add customer review", value=False, key=f"rev_on_{token_id}")
+    review_rating: int | None = None
+    review_text: str | None = None
+    if add_review:
+        review_rating = int(
+            st.select_slider(
+                "Rating",
+                options=[1, 2, 3, 4, 5],
+                value=5,
+                key=f"rev_rating_{token_id}",
+            )
+        )
+        review_text = st.text_area(
+            "Review (optional)",
+            key=f"rev_text_{token_id}",
+            height=70,
+            placeholder="Customer feedback...",
+        )
 
     if not confirm_before_payment:
         if st.button("💳 Process Payment", use_container_width=True,
                      type="primary", key=f"pay_{token_id}"):
-            on_payment(items, total, method)
+            on_payment(items, total, method, review_rating, review_text)
     elif not confirm_state:
         if st.button("💳 Process Payment", use_container_width=True,
                      type="primary", key=f"pay_{token_id}"):
@@ -551,7 +657,7 @@ def bill_view(
             if st.button("✅ Confirm", use_container_width=True,
                          type="primary", key=f"conf_{token_id}"):
                 set_confirm(False)
-                on_payment(items, total, method)
+                on_payment(items, total, method, review_rating, review_text)
         with c2:
             if st.button("❌ Cancel", use_container_width=True,
                          key=f"canc_{token_id}"):
@@ -588,7 +694,7 @@ def item_selector(
     price    = float(sel_item["price"])
     st.markdown(
         f"<div style='font-family:IBM Plex Mono,monospace;font-size:.78rem;"
-        f"color:#c07c3a;margin:3px 0 6px;'>{currency}{price:,.2f}</div>",
+        f"color:var(--caramel);margin:3px 0 6px;'>{html.escape(str(currency))}{price:,.2f}</div>",
         unsafe_allow_html=True,
     )
     qty = st.number_input("Qty", min_value=1, value=1, step=1,
@@ -596,6 +702,93 @@ def item_selector(
     if st.button("＋ Add to Bill", use_container_width=True,
                  key=f"add_{token_id}"):
         on_add(sel_item, int(qty))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# KITCHEN DISPLAY
+# ──────────────────────────────────────────────────────────────────────────────
+
+def kitchen_display_ui(
+    rows: list[dict[str, Any]],
+    on_set_status: Callable[[int, str], None],
+    on_back: Callable[[], None],
+) -> None:
+    st.markdown(
+        """<div style="display:flex;justify-content:space-between;align-items:center;
+                        margin:.1rem 0 .8rem;">
+            <div>
+                <div style="font-family:'Playfair Display',serif;font-size:1.45rem;
+                            color:var(--gold);">🍳 Kitchen Display</div>
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:.62rem;
+                            letter-spacing:.08em;color:var(--steam);text-transform:uppercase;">
+                    Live prep queue by token</div>
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    if st.button("⬅ Back to Cashier View", key="kds_back_btn"):
+        on_back()
+
+    if not rows:
+        st.info("No active orders in queue.")
+        return
+
+    grouped: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        tid = int(row.get("token_id", 0))
+        if tid not in grouped:
+            grouped[tid] = {
+                "token_label": row.get("token_label", f"Token {tid}"),
+                "token_type": row.get("token_type", "dine_in"),
+                "items": [],
+            }
+        grouped[tid]["items"].append(row)
+
+    for token_id in sorted(grouped.keys()):
+        token = grouped[token_id]
+        label = html.escape(str(token["token_label"]))
+        ttype = html.escape(str(token["token_type"]))
+        items = token["items"]
+        with st.expander(
+            f"**{label}** · `{ttype}` · {len(items)} item(s)",
+            expanded=True,
+        ):
+            for item in items:
+                line_id = int(item["id"])
+                name = html.escape(str(item.get("item_name", "?")))
+                qty = int(item.get("quantity", 1))
+                status = str(item.get("prep_status", "new"))
+                added_at_s = str(item.get("added_at", ""))
+                try:
+                    added_at = datetime.strptime(added_at_s, "%Y-%m-%d %H:%M:%S")
+                    age_mins = max(0, int((datetime.now() - added_at).total_seconds() // 60))
+                except ValueError:
+                    age_mins = 0
+
+                color = {"new": "var(--gold)", "preparing": "var(--dev-accent)", "ready": "#2e8b57"}.get(status, "var(--steam)")
+                st.markdown(
+                    f"""<div style="padding:.4rem .6rem;border:1px solid var(--mahogany);
+                                    border-radius:6px;margin:.35rem 0;background:var(--espresso);">
+                        <span style="color:var(--cream);">{name}</span>
+                        <span style="color:var(--steam);"> ×{qty}</span>
+                        <span style="float:right;color:{color};font-family:'IBM Plex Mono',monospace;">
+                            {html.escape(status.upper())}</span>
+                        <div style="font-size:.68rem;color:var(--steam);margin-top:.25rem;">
+                            In queue: {age_mins} min</div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    if st.button("🆕 New", key=f"kds_new_{line_id}", use_container_width=True, disabled=(status == "new")):
+                        on_set_status(line_id, "new")
+                with c2:
+                    if st.button("🔥 Preparing", key=f"kds_prep_{line_id}", use_container_width=True, disabled=(status == "preparing")):
+                        on_set_status(line_id, "preparing")
+                with c3:
+                    if st.button("✅ Ready", key=f"kds_ready_{line_id}", use_container_width=True, disabled=(status == "ready")):
+                        on_set_status(line_id, "ready")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -701,8 +894,11 @@ def owner_dashboard_ui(
     hc1, hc2 = st.columns([4, 1])
     with hc1:
         st.markdown(
-            """<div style="font-family:'Playfair Display',serif;font-size:1.5rem;
-                           color:#e0a84b;margin-bottom:.2rem;">👑 Owner Dashboard</div>""",
+            """<div class="cb-panel" style="padding:.8rem .95rem;">
+                <div style="font-family:'Playfair Display',serif;font-size:1.45rem;
+                           color:var(--gold);margin-bottom:.15rem;">👑 Owner Dashboard</div>
+                <div class="cb-muted">Business controls and reporting</div>
+            </div>""",
             unsafe_allow_html=True,
         )
     with hc2:
@@ -725,10 +921,9 @@ def owner_dashboard_ui(
             on_dash_date_change(chosen)
     with dc2:
         st.markdown(
-            f"<div style='font-family:IBM Plex Mono,monospace;font-size:.6rem;"
-            f"color:#8a7566;text-transform:uppercase;letter-spacing:.1em;"
-            f"padding-top:.4rem;'>System date<br>"
-            f"<span style='color:#e0a84b;font-size:.75rem;'>{today}</span></div>",
+            f"<div class='cb-panel' style='font-family:IBM Plex Mono,monospace;font-size:.6rem;"
+            f"color:var(--steam);text-transform:uppercase;letter-spacing:.1em;'>System date<br>"
+            f"<span style='color:var(--gold);font-size:.76rem;'>{today}</span></div>",
             unsafe_allow_html=True,
         )
 
@@ -760,7 +955,7 @@ def owner_dashboard_ui(
                     ⚠️ {n_missing} receipt file{"s" if n_missing > 1 else ""} missing
                     for {dash_date}
                 </span><br>
-                <span style="color:#c07070;font-size:.65rem;">
+                <span style="color:var(--danger-txt);font-size:.65rem;opacity:.85;">
                     Transaction records are intact in the database.
                     Only the CSV export files are gone.
                 </span>
@@ -802,6 +997,7 @@ def owner_dashboard_ui(
             )
             show = [c for c in ["paid_at", "work_date", "token_label",
                                   "token_type", "total", "payment_method",
+                                  "customer_rating", "customer_review",
                                   "receipt", "id"]
                     if c in df.columns]
             st.dataframe(df[show], use_container_width=True, hide_index=True)
@@ -811,14 +1007,14 @@ def owner_dashboard_ui(
         # Token cap indicator
         cap_pct = int(token_count / token_max * 100) if token_max else 100
         st.markdown(
-            f"""<div style="background:#1a1007;border:1px solid #3d2b1a;
+            f"""<div style="background:var(--espresso);border:1px solid var(--mahogany);
                             border-radius:6px;padding:.6rem 1rem;margin-bottom:.8rem;
                             font-family:'IBM Plex Mono',monospace;font-size:.68rem;">
-                <span style="color:#8a7566;text-transform:uppercase;
+                <span style="color:var(--steam);text-transform:uppercase;
                               letter-spacing:.1em;">Token Usage &nbsp;</span>
-                <span style="color:#e0a84b;font-weight:600;">
+                <span style="color:var(--gold);font-weight:600;">
                     {token_count} / {token_max}</span>
-                {"&nbsp;<span style='color:#e05555;'>— cap reached</span>" if token_count >= token_max else ""}
+                {"&nbsp;<span style='color:var(--danger-txt);'>— cap reached</span>" if token_count >= token_max else ""}
             </div>""",
             unsafe_allow_html=True,
         )
@@ -837,6 +1033,7 @@ def owner_dashboard_ui(
             with st.expander(
                 f"**{label}** — {status}  `{ttype}`", expanded=False
             ):
+                st.caption(f"Token ID: {tid}")
                 new_label = st.text_input("Rename", value=label, key=f"ren_{tid}")
                 rc1, rc2, rc3 = st.columns(3)
                 with rc1:
@@ -914,13 +1111,13 @@ def _settings_tab(
 
     if not dev_session_valid:
         st.markdown(
-            """<div style="background:#1e3a5f;border:1px solid #2d5a8e;border-radius:8px;
+            """<div style="background:var(--dev-dark);border:1px solid var(--mahogany);border-radius:8px;
                            padding:1.4rem;max-width:400px;margin:1rem auto 1.5rem;">
                 <div style="font-family:'Playfair Display',serif;font-size:1.1rem;
-                            color:#4a90d9;margin-bottom:.3rem;text-align:center;">
+                            color:var(--dev-accent);margin-bottom:.3rem;text-align:center;">
                     🔧 Developer Access Required</div>
                 <div style="font-family:'IBM Plex Mono',monospace;font-size:.6rem;
-                            color:#8aabcc;letter-spacing:.1em;text-transform:uppercase;
+                            color:var(--steam);letter-spacing:.1em;text-transform:uppercase;
                             text-align:center;margin-bottom:1rem;">
                     System settings are protected</div>""",
             unsafe_allow_html=True,
@@ -954,12 +1151,12 @@ def _settings_tab(
         note = (f"Session expires in {dev_session_timeout} min"
                 if dev_session_timeout > 0 else "Session never expires")
         st.markdown(
-            f"""<div style="background:#1e3a5f;border:1px solid #2d5a8e;
+            f"""<div style="background:var(--dev-dark);border:1px solid var(--mahogany);
                             border-radius:6px;padding:.55rem 1rem;
                             font-family:'IBM Plex Mono',monospace;
-                            font-size:.65rem;color:#4a90d9;">
+                            font-size:.65rem;color:var(--dev-accent);">
                 🔧 Developer session active &nbsp;·&nbsp;
-                <span style="color:#8aabcc;">{note}</span></div>""",
+                <span style="color:var(--steam);">{note}</span></div>""",
             unsafe_allow_html=True,
         )
     with sc2:
@@ -1094,16 +1291,16 @@ def _settings_tab(
 
         used_pct = int(token_count / token_max * 100) if token_max else 100
         st.markdown(
-            f"""<div style="background:#1a1007;border:1px solid #3d2b1a;
+            f"""<div style="background:var(--espresso);border:1px solid var(--mahogany);
                             border-radius:6px;padding:.8rem 1rem;margin-bottom:1rem;
                             font-family:'IBM Plex Mono',monospace;font-size:.72rem;">
-                <div style="color:#8a7566;text-transform:uppercase;
+                <div style="color:var(--steam);text-transform:uppercase;
                               letter-spacing:.1em;font-size:.6rem;margin-bottom:.3rem;">
                     Current usage</div>
-                <span style="color:#e0a84b;font-size:1.1rem;font-weight:700;">
+                <span style="color:var(--gold);font-size:1.1rem;font-weight:700;">
                     {token_count}</span>
-                <span style="color:#8a7566;"> / {token_max} tokens</span>
-                <span style="color:{'#e05555' if used_pct >= 100 else '#8a7566'};">
+                <span style="color:var(--steam);"> / {token_max} tokens</span>
+                <span style="color:{'var(--danger-txt)' if used_pct >= 100 else 'var(--steam)'};">
                     &nbsp;({used_pct}%)</span>
             </div>""",
             unsafe_allow_html=True,
@@ -1129,7 +1326,7 @@ def _settings_tab(
 def _label_mono(text: str) -> None:
     st.markdown(
         f"<div style='font-family:IBM Plex Mono,monospace;font-size:.6rem;"
-        f"color:#8a7566;letter-spacing:.16em;text-transform:uppercase;"
+        f"color:var(--steam);letter-spacing:.16em;text-transform:uppercase;"
         f"margin-bottom:.5rem;'>{text}</div>",
         unsafe_allow_html=True,
     )
@@ -1138,7 +1335,7 @@ def _label_mono(text: str) -> None:
 def _section(text: str) -> None:
     st.markdown(
         f"<div style='font-family:IBM Plex Mono,monospace;font-size:.62rem;"
-        f"color:#8a7566;letter-spacing:.1em;text-transform:uppercase;"
+        f"color:var(--steam);letter-spacing:.1em;text-transform:uppercase;"
         f"margin:.6rem 0 .3rem;'>{text}</div>",
         unsafe_allow_html=True,
     )
