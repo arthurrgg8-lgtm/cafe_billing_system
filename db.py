@@ -38,6 +38,7 @@ def _conn() -> Generator[sqlite3.Connection, None, None]:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
+    con.execute("PRAGMA busy_timeout=5000")
     try:
         yield con
         con.commit()
@@ -72,6 +73,7 @@ CREATE TABLE IF NOT EXISTS active_orders (
     unit_price  REAL    NOT NULL,
     quantity    INTEGER NOT NULL DEFAULT 1,
     subtotal    REAL    NOT NULL,
+    prep_status TEXT    NOT NULL DEFAULT 'new',
     cashier_id  INTEGER,
     added_at    TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -89,7 +91,10 @@ CREATE TABLE IF NOT EXISTS bills (
     filename       TEXT,
     paid_at        TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
     work_date      TEXT,
-    notes          TEXT
+    notes          TEXT,
+    customer_rating INTEGER,
+    customer_review TEXT,
+    reviewed_at     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS bill_items (
@@ -122,12 +127,20 @@ CREATE TABLE IF NOT EXISTS menu_items (
     created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
     updated_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_active_orders_token_id ON active_orders(token_id);
+CREATE INDEX IF NOT EXISTS idx_bills_work_date ON bills(work_date);
+CREATE INDEX IF NOT EXISTS idx_bills_paid_at ON bills(paid_at);
 """
 
 # Columns added after initial deploy — applied via ALTER TABLE if missing
 _MIGRATIONS = [
     # (table, column, definition)
     ("bills", "work_date", "TEXT"),
+    ("active_orders", "prep_status", "TEXT NOT NULL DEFAULT 'new'"),
+    ("bills", "customer_rating", "INTEGER"),
+    ("bills", "customer_review", "TEXT"),
+    ("bills", "reviewed_at", "TEXT"),
 ]
 
 
@@ -172,12 +185,15 @@ class TokenService:
         Existing tokens are never touched.
         """
         with _conn() as con:
-            existing = con.execute("SELECT COUNT(*) FROM tokens").fetchone()[0]
             target   = min(count, token_max)
-            for i in range(existing + 1, target + 1):
+            existing = con.execute("SELECT COUNT(*) FROM tokens").fetchone()[0]
+            for _ in range(existing, target):
+                next_id = con.execute(
+                    "SELECT COALESCE(MAX(id), 0) + 1 FROM tokens"
+                ).fetchone()[0]
                 con.execute(
                     "INSERT INTO tokens (id, label, type) VALUES (?, ?, 'dine_in')",
-                    (i, f"{label_prefix} {i}"),
+                    (next_id, f"{label_prefix} {next_id}"),
                 )
 
     @staticmethod
@@ -191,13 +207,11 @@ class TokenService:
             total = con.execute("SELECT COUNT(*) FROM tokens").fetchone()[0]
             if total >= token_max:
                 return False, f"Token cap of {token_max} reached. Ask the developer to raise the limit."
-            new_id = con.execute(
-                "SELECT COALESCE(MAX(id), 0) + 1 FROM tokens"
-            ).fetchone()[0]
-            con.execute(
-                "INSERT INTO tokens (id, label, type) VALUES (?, ?, ?)",
-                (new_id, label, token_type),
+            cur = con.execute(
+                "INSERT INTO tokens (label, type) VALUES (?, ?)",
+                (label, token_type),
             )
+            new_id = int(cur.lastrowid)
             return True, f"Token '{label}' added (id {new_id})."
 
     @staticmethod
@@ -273,6 +287,7 @@ class TokenService:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class OrderService:
+    _PREP_STAGES = {"new", "preparing", "ready"}
 
     @staticmethod
     def get_items(token_id: int) -> list[dict[str, Any]]:
@@ -280,6 +295,19 @@ class OrderService:
             rows = con.execute(
                 "SELECT * FROM active_orders WHERE token_id = ? ORDER BY added_at",
                 (token_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    @staticmethod
+    def get_kitchen_snapshot() -> list[dict[str, Any]]:
+        with _conn() as con:
+            rows = con.execute(
+                """SELECT ao.id, ao.token_id, ao.item_name, ao.quantity, ao.added_at,
+                          ao.prep_status, t.label AS token_label, t.type AS token_type
+                   FROM active_orders ao
+                   JOIN tokens t ON t.id = ao.token_id
+                   WHERE t.enabled = 1
+                   ORDER BY ao.added_at ASC, ao.id ASC"""
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -299,8 +327,8 @@ class OrderService:
             con.execute(
                 """INSERT INTO active_orders
                    (token_id, item_name, item_id, category,
-                    unit_price, quantity, subtotal, cashier_id, added_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    unit_price, quantity, subtotal, prep_status, cashier_id, added_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)""",
                 (token_id, item_name, item_id, category,
                  unit_price, quantity, subtotal, cashier_id, now),
             )
@@ -330,6 +358,17 @@ class OrderService:
                     "UPDATE tokens SET active = 0, opened_at = NULL WHERE id = ?",
                     (token_id,),
                 )
+
+    @staticmethod
+    def set_prep_status(order_line_id: int, prep_status: str) -> None:
+        status = prep_status.strip().lower()
+        if status not in OrderService._PREP_STAGES:
+            raise ValueError(f"Invalid prep status: {prep_status}")
+        with _conn() as con:
+            con.execute(
+                "UPDATE active_orders SET prep_status = ? WHERE id = ?",
+                (status, order_line_id),
+            )
 
     @staticmethod
     def clear_token(token_id: int) -> None:
@@ -373,6 +412,32 @@ class OrderService:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class BillService:
+    @staticmethod
+    def get(bill_id: str) -> dict[str, Any] | None:
+        with _conn() as con:
+            row = con.execute(
+                "SELECT * FROM bills WHERE id = ?",
+                (bill_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    @staticmethod
+    def save_customer_review(
+        bill_id: str,
+        rating: int,
+        review: str,
+        reviewed_at: str | None = None,
+    ) -> None:
+        safe_rating = max(1, min(5, int(rating)))
+        safe_review = (review or "").strip()
+        ts = reviewed_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with _conn() as con:
+            con.execute(
+                """UPDATE bills
+                   SET customer_rating = ?, customer_review = ?, reviewed_at = ?
+                   WHERE id = ?""",
+                (safe_rating, safe_review, ts, bill_id),
+            )
 
     @staticmethod
     def close_bill(
@@ -388,6 +453,9 @@ class BillService:
         cashier_id: int | None = None,
         filename: str | None = None,
         notes: str | None = None,
+        customer_rating: int | None = None,
+        customer_review: str | None = None,
+        reviewed_at: str | None = None,
     ) -> str:
         """Write a closed bill + line items. Returns the UUID bill id."""
         bill_id = str(uuid.uuid4())
@@ -397,11 +465,13 @@ class BillService:
             con.execute(
                 """INSERT INTO bills
                    (id, token_id, token_label, token_type, total, discount, tax,
-                    payment_method, cashier_id, filename, paid_at, work_date, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    payment_method, cashier_id, filename, paid_at, work_date, notes,
+                    customer_rating, customer_review, reviewed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (bill_id, token_id, token_label, token_type,
                  total, discount, tax, payment_method,
-                 cashier_id, filename, now, work_date, notes),
+                 cashier_id, filename, now, work_date, notes,
+                 customer_rating, customer_review, reviewed_at),
             )
             for item in items:
                 con.execute(
@@ -563,6 +633,10 @@ class BillService:
         w.writerow(["", "", "", "PAYMENT",    bill["payment_method"].upper()])
         w.writerow(["", "", "", "WORK DATE",  bill.get("work_date", "")])
         w.writerow(["", "", "", "PAID AT",    bill["paid_at"]])
+        if bill.get("customer_rating") is not None:
+            w.writerow(["", "", "", "CUSTOMER RATING", bill.get("customer_rating", "")])
+        if bill.get("customer_review"):
+            w.writerow(["", "", "", "CUSTOMER REVIEW", bill.get("customer_review", "")])
         w.writerow(["", "", "", "BILL ID",    bill["id"][:8].upper()])
         return buf.getvalue()
 
